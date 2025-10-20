@@ -60,6 +60,61 @@ main(int argc, char *argv[])
 void
 memdump(char *fmt, char *data)
 {
+  char* global = data;
   // Your code here.
+  for(int i = 0;fmt[i] != '\0';i++)
+  {
+    switch (*(fmt+i))
+    {
+    case 'i':{
+      uint32 val;
+      memcpy(&val, global, 4);
+      printf("%d\n",val);
+      global +=4;
+      /* code */
+      break;
+    }
+    case 'p':{
+
+      uint64 val;
+      memcpy(&val, global, 8);
+      printf("%lx\n",val);
+      global += 8;
+      break;
+    }
+    case 'h':{
+
+      uint16 val;
+      memcpy(&val,global,2);
+      printf("%d\n",val);
+      global +=2;
+      break;
+    }
+    case 'c':{
+
+      char p ;
+      memcpy(&p,global,1);
+      printf("%c\n",p);
+      global +=1;
+      break;
+    }
+    case 's':{
+
+      uint64 ptr;
+      memcpy(&ptr,global,8);
+      char* str = (char*)ptr;
+      printf("%s\n",str);
+      global += 8;
+      break;
+    }
+    case 'S':
+      printf("%s\n",global);
+      return;
+    default:
+      break;
+    }
+  }
 
 }
+
+

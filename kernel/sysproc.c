@@ -105,3 +105,12 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64 sys_interpose(void)
+{
+  int mask;
+  argint(0,&mask);
+  argstr(1,myproc()->pathnames,MAXPATH);
+  myproc()->sandbox_mask = mask;
+  return 0;
+}

@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "types.h": "c",
+        "user.h": "c",
+        "memlayout.h": "c",
+        "fcntl.h": "c",
+        "syscall.h": "c",
+        "param.h": "c",
+        "stat.h": "c"
+    },
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc"
+}

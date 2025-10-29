@@ -131,6 +131,16 @@ found:
     release(&p->lock);
     return 0;
   }
+  // map the USYSCALL
+  p->speeduppage = (char*)kalloc();
+  if (p->speeduppage == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  //   // 初始化struct usyscall
+  struct usyscall *usys = (struct usyscall *)p->speeduppage;
+  usys->pid = p->pid;  // p是当前进程的proc结构体
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
@@ -158,6 +168,12 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->speeduppage)
+  {
+    // 解除 USYSCALL 的页表映射
+    kfree((void*)p->speeduppage);
+    p->speeduppage = 0;
+  }
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -202,6 +218,13 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
+  if(mappages(pagetable, USYSCALL, PGSIZE,
+              (uint64)p->speeduppage, PTE_R | PTE_U ) < 0){
+    uvmunmap(pagetable, USYSCALL, 1, 0);
+    uvmfree(pagetable, 0);
+    return 0;
+  }
+
   return pagetable;
 }
 
@@ -212,6 +235,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmfree(pagetable, sz);
 }
 
@@ -240,11 +264,18 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
-  if(n > 0){
+  if(n>=SUPERPGSIZE){
+    if((sz = uvmalloc_super(p->pagetable, sz, sz + n, PTE_W)) == 0){
+      return -1;
+    }
+  } else if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
     }
   } else if(n < 0){
+    // TODO: we should add degrade there 
+    // add a new function traversal the pagetable to judge wether it's belong to superpage
+    // then to call uvmdealloc_super or uvmdealloc
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;

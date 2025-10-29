@@ -142,9 +142,39 @@ walkaddr(pagetable_t pagetable, uint64 va)
 
 
 #if defined(LAB_PGTBL) || defined(SOL_MMAP) || defined(SOL_COW)
+// 在 vm.c 中实现 vmpint 函数
+void vmpint(pagetable_t pagetable, uint64 va, int depth) {
+    if (depth == 0) {
+        printf("page table %p\n", pagetable);
+    }
+    for (int i = 0; i < 512; i++) {
+        pte_t pte = pagetable[i];
+        if (pte & PTE_V) {
+          // 这个还真不知道是这个样子得到的。
+            uint64 current_va = va | ((uint64)i << (30 - 9 * depth));
+            
+            // 替换%.*s，循环输出depth次".."
+            for (int d = 0; d <= depth; d++) {
+                printf("..");
+            }
+
+            printf("%p: pte %p pa %p\n", 
+                   (void*)current_va, 
+                   (void*)pte, 
+                   (void*)PTE2PA(pte));
+
+            if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+                uint64 child_pa = PTE2PA(pte);
+                pagetable_t child = (pagetable_t)child_pa;
+                vmpint(child, current_va, depth + 1);
+            }
+        }
+    }
+}
 void
 vmprint(pagetable_t pagetable) {
   // your code here
+  vmpint(pagetable,0,0);
 }
 #endif
 
@@ -196,6 +226,35 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
+int
+mappages_super(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+{
+  if ((va % SUPERPGSIZE) != 0 || (size % SUPERPGSIZE) != 0)
+    panic("mappages_super: va/size not 2MB-aligned");
+  if (size != SUPERPGSIZE)
+    panic("mappages_super: size must be 2MB");
+
+  // 步骤1：获取中层页表（Level 1）的PTE指针
+  // 先通过顶层页表（Level 2）找到中层页表（Level 1）的物理地址
+  pte_t *l2_pte = &pagetable[PX(2, va)];  // 顶层页表索引（VPN[2]）
+  if (!(*l2_pte & PTE_V)) {
+    // 若中层页表不存在，分配并初始化
+    pagetable_t l1_pagetable = (pagetable_t)kalloc();
+    if (!l1_pagetable) return -1;
+    memset(l1_pagetable, 0, PGSIZE);
+    *l2_pte = PA2PTE(l1_pagetable) | PTE_V;  // 顶层PTE指向中层页表
+  }
+  pagetable_t l1_pagetable = (pagetable_t)PTE2PA(*l2_pte);  // 中层页表基地址
+
+  // 步骤2：在中层页表中设置2MB超级页的PTE（VPN[1]索引）
+  pte_t *l1_pte = &l1_pagetable[PX(1, va)];  // 中层页表索引（VPN[1]）
+  if (*l1_pte & PTE_V)
+    panic("mappages_super: remap");
+  *l1_pte = PA2PTE(pa) | perm | PTE_V;  // 中层PTE直接映射2MB物理页
+
+  return 0;
+}
+
 // create an empty user page table.
 // returns 0 if out of memory.
 pagetable_t
@@ -238,6 +297,23 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   }
 }
 
+// 解除超级页映射并释放物理内存
+void
+uvmunmap_super(pagetable_t pagetable, uint64 va, uint64 num, int do_free)
+{
+  for (uint64 i = 0; i < num; i++) {
+    uint64 a = va + i * SUPERPGSIZE;
+    pte_t *pte = &pagetable[PX(2, a)];
+    if (!(*pte & PTE_V))
+      panic("uvmunmap_super: not mapped");
+    if (do_free) {
+      char *pa = (char*)PTE2PA(*pte);
+      superfree(pa);
+    }
+    *pte = 0;
+  }
+}
+
 
 // Allocate PTEs and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
@@ -270,6 +346,59 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
   }
   return newsz;
 }
+uint64
+uvmdealloc_super(pagetable_t pagetable, uint64 oldsz, uint64 newsz);
+
+uint64
+uvmalloc_super(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+{
+  char *mem;
+  uint64 a;
+  int sz;
+  uint64 super_oldsz;  // 2MB对齐后的起始地址
+  uint64 normal_oldsz;
+
+  if (newsz < oldsz)
+    return oldsz;
+
+  // 步骤1：计算需要填补的地址空洞（oldsz 到 2MB对齐地址）
+  normal_oldsz = PGROUNDUP(oldsz);
+  super_oldsz = SUPERPGROUNDUP(oldsz);
+  uint64 gap = super_oldsz - normal_oldsz;
+
+  // 步骤2：用普通页填补空洞（若存在）
+  if (gap > 0) {
+    // 调用普通uvmalloc分配 [oldsz, super_oldsz) 的普通页
+    if (uvmalloc(pagetable, oldsz, super_oldsz, xperm) != super_oldsz) {
+      return 0;  // 空洞填补失败，返回错误
+    }
+  }
+
+  // 步骤3：从2MB对齐地址开始分配超级页
+  for (a = super_oldsz; a < newsz; a += sz) {
+    sz = SUPERPGSIZE;
+    mem = superalloc();  // 分配2MB物理块
+    if (mem == 0) {
+      // 回滚：释放已分配的超级页和空洞的普通页
+      uvmdealloc_super(pagetable, a, super_oldsz);
+      if (gap > 0) {
+        uvmdealloc(pagetable, super_oldsz, oldsz);
+      }
+      return 0;
+    }
+    memset(mem, 0, SUPERPGSIZE);
+    if (mappages_super(pagetable, a, SUPERPGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0) {
+      superfree(mem);
+      uvmdealloc_super(pagetable, a, super_oldsz);
+      if (gap > 0) {
+        uvmdealloc(pagetable, super_oldsz, oldsz);
+      }
+      return 0;
+    }
+  }
+
+  return newsz;
+}
 
 // Deallocate user pages to bring the process size from oldsz to
 // newsz.  oldsz and newsz need not be page-aligned, nor does newsz
@@ -288,6 +417,25 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
   return newsz;
 }
+
+uint64
+uvmdealloc_super(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+{
+  if(newsz >= oldsz)
+    return oldsz;
+  oldsz = SUPERPGROUNDUP(oldsz);
+  newsz = SUPERPGROUNDUP(newsz);
+
+  // === 超级页释放分支 ===
+    uint64 delta = oldsz - newsz;
+    if (delta >= SUPERPGSIZE) {
+      uint64 num_superpages = delta / SUPERPGSIZE;
+      uvmunmap_super(pagetable, newsz, num_superpages, 1);
+    }
+    return newsz;
+}
+
+
 
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.

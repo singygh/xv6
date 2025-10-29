@@ -9,7 +9,11 @@
 #include "riscv.h"
 #include "defs.h"
 
+#define STOP PHYSTOP-28*SUPERPGSIZE
+
 void freerange(void *pa_start, void *pa_end);
+void superfreerange(void *pa_start, void *pa_end);
+
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
@@ -23,11 +27,20 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct {
+  struct spinlock lock;
+  struct run *freelist;
+} smem;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  freerange(end, (void*)STOP);
+
+  // 初始化超级页的空闲列表
+  initlock(&smem.lock, "smem");
+  superfreerange((void*)STOP, (void*)PHYSTOP);
 }
 
 void
@@ -37,6 +50,17 @@ freerange(void *pa_start, void *pa_end)
   p = (char*)PGROUNDUP((uint64)pa_start);
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
+}
+
+void
+superfreerange(void *pa_start, void *pa_end)
+{
+  char *p;
+  // 向上对齐到 2MB 边界
+  p = (char*)SUPERPGROUNDUP((uint64)pa_start);
+  for (; p + SUPERPGSIZE <= (char*)pa_end; p += SUPERPGSIZE) {
+    superfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -79,4 +103,44 @@ kalloc(void)
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+void*
+superalloc(void)
+{
+  struct run *r;
+
+  acquire(&smem.lock);
+  r = smem.freelist;
+  if (r) {
+    smem.freelist = r->next;
+  }
+  release(&smem.lock);
+
+  if (r) {
+    memset(r, 1, SUPERPGSIZE);  // 填垃圾数据，检测悬空引用
+  }
+  return (void*)r;
+}
+
+void
+superfree(void *pa)
+{
+  struct run *r;
+
+  // 检查是否 2MB 对齐、是否在超级页预留区域内
+  if (((uint64)pa % SUPERPGSIZE) != 0 || 
+      (char*)pa < (char*)STOP || 
+      (uint64)pa >= PHYSTOP) {
+    panic("superfree");
+  }
+
+  memset(pa, 1, SUPERPGSIZE);  // 填垃圾数据
+
+  r = (struct run*)pa;
+
+  acquire(&smem.lock);
+  r->next = smem.freelist;
+  smem.freelist = r;
+  release(&smem.lock);
 }

@@ -184,6 +184,8 @@ void            uvmunmap(pagetable_t, uint64, uint64, int);
 void            uvmunmap_super(pagetable_t, uint64, uint64, int);
 void            uvmclear(pagetable_t, uint64);
 pte_t *         walk(pagetable_t, uint64, int);
+pte_t *         walk_level(pagetable_t, uint64, int,int*);
+
 uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
